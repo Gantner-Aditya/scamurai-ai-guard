@@ -76,6 +76,7 @@ const baseAlerts: Alert[] = [
 ];
 
 const attackAlert: Alert = { id: "INC-2844", title: "Coordinated Multi-Zone Intrusion", source: "FUSION AI", location: "Doors 102–106 · Server Wing", time: "now", severity: "critical", confidence: "99.2%", analysis: "Distributed credential attack" };
+const defaultAlert: Alert = baseAlerts[0] ?? attackAlert;
 
 const doors = [
   { name: "SVN-102", place: "Server Wing", battery: 94, sync: "38s ago", lag: 0, state: "Secured" },
@@ -120,7 +121,7 @@ function Dashboard() {
   };
 
   const downloadReport = () => {
-    const report = `SCAMURAI INCIDENT DOSSIER\n${selected?.id ?? "INC-2841"}\nGenerated: ${new Date().toISOString()}\n\nThreat: ${selected?.title ?? baseAlerts[0].title}\nConfidence: ${selected?.confidence ?? baseAlerts[0].confidence}\nLocation: ${selected?.location ?? baseAlerts[0].location}\n\nAudit trail preserved. Evidence hash: 8F3A-992C-17DB.`;
+    const report = `SCAMURAI INCIDENT DOSSIER\n${selected?.id ?? "INC-2841"}\nGenerated: ${new Date().toISOString()}\n\nThreat: ${selected?.title ?? defaultAlert.title}\nConfidence: ${selected?.confidence ?? defaultAlert.confidence}\nLocation: ${selected?.location ?? defaultAlert.location}\n\nAudit trail preserved. Evidence hash: 8F3A-992C-17DB.`;
     const url = URL.createObjectURL(new Blob([report], { type: "text/plain" }));
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -187,7 +188,7 @@ function Dashboard() {
 
       <Dialog open={dossier} onOpenChange={setDossier}>
         <DialogContent className="inset-3 left-3 top-3 h-[calc(100vh-1.5rem)] w-[calc(100vw-1.5rem)] max-w-none translate-x-0 translate-y-0 overflow-y-auto rounded-md border-border bg-background p-0 sm:inset-6 sm:h-[calc(100vh-3rem)] sm:w-[calc(100vw-3rem)]">
-          <Dossier alert={selected ?? baseAlerts[0]} onDownload={downloadReport} />
+          <Dossier alert={selected ?? defaultAlert} onDownload={downloadReport} />
         </DialogContent>
       </Dialog>
     </main>
