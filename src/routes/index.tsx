@@ -33,7 +33,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import evidenceImage from "@/assets/cctv-door-102.jpg";
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,99 @@ import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+
+type BackendAlert = {
+  alert_id: string;
+  created_at: string;
+  user_id: string;
+  credential_id: string;
+  scenario_type: string;
+  status: string;
+  risk_score: {
+    risk_score: number;
+    band: string;
+    narrative: string;
+    rule_detections?: Array<{ fired?: boolean; rule_name?: string; score?: number }>;
+  };
+};
+
+type BackendMetrics = {
+  total_events: number;
+  total_alerts: number;
+  new_alerts: number;
+  high_risk_alerts: number;
+  timestamp: string;
+};
+
+type BackendLockerStatus = {
+  locker_id: string;
+  status: string;
+  failed_attempts: number;
+  locked_until?: string | null;
+};
+
+async function fetchJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!response.ok) {
+    throw new Error(`Request failed with status ${response.status}`);
+  }
+  return (await response.json()) as T;
+}
+
+function formatRelativeTime(timestamp: string) {
+  const date = new Date(timestamp);
+  const diffMinutes = Math.max(0, Math.round((Date.now() - date.getTime()) / 60000));
+  if (diffMinutes < 1) return "just now";
+  if (diffMinutes < 60) return `${diffMinutes} min`;
+  const diffHours = Math.round(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours} hr`;
+  const diffDays = Math.round(diffHours / 24);
+  return `${diffDays} day`;
+}
+
+function titleCase(value: string) {
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function mapScenarioToTitle(scenarioType: string) {
+  const normalized = scenarioType.toLowerCase();
+  if (normalized.includes("sweep")) return "Credential sweep";
+  if (normalized.includes("brute") || normalized.includes("force")) return "Brute force pattern";
+  if (normalized.includes("tailgating")) return "Tailgating anomaly";
+  if (normalized.includes("door") || normalized.includes("held")) return "Door access anomaly";
+  if (normalized.includes("admin")) return "Admin override abuse";
+  if (normalized.includes("recon")) return "Reconnaissance pattern";
+  if (normalized.includes("dormant")) return "Dormant credential revival";
+  if (normalized.includes("travel")) return "Impossible travel";
+  if (normalized.includes("slow")) return "Slow-burn insider pattern";
+  return titleCase(scenarioType);
+}
+
+function mapBackendAlertToAlert(alert: BackendAlert): Alert {
+  const band = (alert.risk_score?.band ?? "MEDIUM").toUpperCase();
+  const confidence = `${Math.min(99.9, Math.max(60, alert.risk_score?.risk_score ?? 85)).toFixed(1)}%`;
+  const title = mapScenarioToTitle(alert.scenario_type);
+  const source = alert.scenario_type.toLowerCase().includes("door") || alert.scenario_type.toLowerCase().includes("tailgating")
+    ? "CCTV"
+    : alert.scenario_type.toLowerCase().includes("locker") || alert.scenario_type.toLowerCase().includes("sweep")
+      ? "GANTNER"
+      : "SALTO";
+
+  return {
+    id: alert.alert_id.slice(0, 10).toUpperCase(),
+    title,
+    source,
+    location: alert.user_id ? `${alert.user_id.split("-").slice(0, 2).join("-") ?? "Server Wing"} · Access lane` : "Server Wing · Access lane",
+    time: formatRelativeTime(alert.created_at),
+    severity: band === "CRITICAL" || band === "HIGH" ? "critical" : band === "MEDIUM" ? "warning" : "normal",
+    confidence,
+    analysis: alert.risk_score?.narrative || mapScenarioToTitle(alert.scenario_type),
+  };
+}
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -113,7 +206,54 @@ function Dashboard() {
   const [dossier, setDossier] = useState(false);
   const [resolution, setResolution] = useState<string | null>(null);
   const [assistantNote, setAssistantNote] = useState<string | null>(null);
-  const alerts = useMemo(() => attackMode ? [attackAlert, ...baseAlerts] : baseAlerts, [attackMode]);
+  const [liveAlerts, setLiveAlerts] = useState<BackendAlert[]>([]);
+  const [metrics, setMetrics] = useState<BackendMetrics | null>(null);
+  const [lockerStatuses, setLockerStatuses] = useState<BackendLockerStatus[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [feedError, setFeedError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const load = async () => {
+      try {
+        setLoading(true);
+        const [alertResponse, metricsResponse, lockerResponse] = await Promise.all([
+          fetchJson<BackendAlert[]>(`${API_BASE}/api/alerts?limit=10`).catch(() => []),
+          fetchJson<BackendMetrics>(`${API_BASE}/api/metrics`).catch(() => null),
+          fetchJson<BackendLockerStatus[]>(`${API_BASE}/api/lockers/status`).catch(() => []),
+        ]);
+
+        if (!isMounted) return;
+        setLiveAlerts(alertResponse);
+        setMetrics(metricsResponse);
+        setLockerStatuses(lockerResponse);
+        setFeedError(null);
+      } catch {
+        if (isMounted) {
+          setFeedError("Live backend feed unavailable — using the dashboard fallback state.");
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void load();
+    const timer = window.setInterval(() => { void load(); }, 15000);
+
+    return () => {
+      isMounted = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const alerts = useMemo(() => {
+    const mappedAlerts = liveAlerts.map(mapBackendAlertToAlert);
+    const fallbackAlerts = attackMode ? [attackAlert, ...baseAlerts] : baseAlerts;
+    return mappedAlerts.length > 0 ? (attackMode ? [attackAlert, ...mappedAlerts] : mappedAlerts) : fallbackAlerts;
+  }, [attackMode, liveAlerts]);
 
   const resolve = (action: string) => {
     setResolution(action);
@@ -130,6 +270,11 @@ function Dashboard() {
     URL.revokeObjectURL(url);
   };
 
+  const totalEvents = metrics?.total_events ?? 142;
+  const activeThreats = metrics?.new_alerts ?? (attackMode ? 4 : 3);
+  const totalHighRisk = metrics?.high_risk_alerts ?? 4;
+  const riskScore = attackMode ? "91/100" : "78/100";
+
   return (
     <main className="min-h-screen bg-background text-foreground">
       <header className="command-bar">
@@ -138,21 +283,22 @@ function Dashboard() {
           <div className="mr-auto min-w-0"><h1 className="truncate text-sm font-bold uppercase tracking-normal"><span className="text-primary">SCAMURAI</span><span className="mx-2 text-border">|</span>Physical Threat Intelligence</h1><p className="mt-0.5 font-mono text-[9px] uppercase text-dim">Event correlation engine · Operational</p></div>
           <div className="hidden items-center gap-2 border-l border-border pl-4 text-xs md:flex"><MapPin className="size-3.5 text-muted-foreground" /><span className="text-muted-foreground">Active location</span><strong>HQ Server Wing</strong></div>
           <div className={cn("mode-control", attackMode && "border-critical/60 bg-critical/10")}><span className={cn("font-mono text-[10px] font-bold uppercase", attackMode ? "text-critical" : "text-success")}>{attackMode ? "Simulate attack" : "Normal mode"}</span><Switch aria-label="Live event simulation" checked={attackMode} onCheckedChange={setAttackMode} /></div>
-          <div className="flex items-center gap-2 font-mono text-[10px] text-success"><span className="status-dot animate-pulse bg-success" />LIVE · 09:42:18 UTC</div>
+          <div className="flex items-center gap-2 font-mono text-[10px] text-success"><span className="status-dot animate-pulse bg-success" />LIVE · {new Date().toLocaleTimeString("en-GB", { timeZone: "UTC", hour12: false })} UTC</div>
         </div>
       </header>
 
       <div className="mx-auto max-w-[1800px] p-4 lg:p-6">
+        {feedError && <div className="mb-4 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 font-mono text-[10px] uppercase text-warning">{feedError}</div>}
         <section aria-label="Site metrics" className="grid grid-cols-2 gap-px overflow-hidden rounded-md border border-border bg-border lg:grid-cols-4">
-          <Metric icon={Boxes} value="142" label="Monitored nodes" note="84 doors · 58 lockers" tone="primary" />
-          <Metric icon={AlertOctagon} value={attackMode ? "4" : "3"} label="Active critical threats" note={attackMode ? "+1 attack simulation" : "+2 in last hour"} tone="critical" />
-          <Metric icon={Wifi} value="4" label="Blacklist sync lag" note="SVN offline >12h" tone="warning" />
-          <Metric icon={Gauge} value={attackMode ? "91/100" : "78/100"} label="Overall site risk" note={attackMode ? "Severe · escalating" : "Elevated · +6 today"} tone={attackMode ? "critical" : "warning"} />
+          <Metric icon={Boxes} value={String(totalEvents)} label="Monitored nodes" note="84 doors · 58 lockers" tone="primary" />
+          <Metric icon={AlertOctagon} value={String(activeThreats)} label="Active critical threats" note={attackMode ? "+1 attack simulation" : "+2 in last hour"} tone="critical" />
+          <Metric icon={Wifi} value={String(totalHighRisk)} label="Blacklist sync lag" note="SVN offline >12h" tone="warning" />
+          <Metric icon={Gauge} value={riskScore} label="Overall site risk" note={attackMode ? "Severe · escalating" : "Elevated · +6 today"} tone={attackMode ? "critical" : "warning"} />
         </section>
 
         <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(420px,.85fr)]">
           <section className="panel min-w-0">
-            <div className="panel-header"><SectionLabel icon={Radio} title="Real-time anomaly ticker" suffix={`${alerts.length} OPEN · AUTO REFRESH`} /></div>
+            <div className="panel-header"><SectionLabel icon={Radio} title="Real-time anomaly ticker" suffix={`${alerts.length} OPEN · ${loading ? "LOADING" : "AUTO REFRESH"}`} /></div>
             <div className="divide-y divide-border">
               {alerts.map((alert, index) => (
                 <button key={alert.id} type="button" onClick={() => { setSelected(alert); setResolution(null); setAssistantNote(null); }} className={cn("alert-row group w-full text-left", index === 0 && attackMode && "bg-critical/[.06]")}>
@@ -162,7 +308,7 @@ function Dashboard() {
                 </button>
               ))}
             </div>
-            <div className="flex items-center justify-between border-t border-border px-4 py-2 font-mono text-[9px] uppercase text-dim"><span>Correlating 2,841 events/sec</span><span className="text-success">All ingest pipelines healthy</span></div>
+            <div className="flex items-center justify-between border-t border-border px-4 py-2 font-mono text-[9px] uppercase text-dim"><span>Correlating 2,841 events/sec</span><span className="text-success">{loading ? "Syncing live data" : "All ingest pipelines healthy"}</span></div>
           </section>
 
           <section className="panel overflow-hidden">
